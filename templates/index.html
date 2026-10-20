@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="{{ csrf_token }}">
+  <title>Session Monitor</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #10151c; color: #edf2f7; }
+    * { box-sizing: border-box; }
+    body { max-width: 860px; margin: 0 auto; padding: 2rem 1rem 4rem; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 1rem; }
+    h1 { font-size: clamp(1.5rem, 5vw, 2rem); overflow-wrap: anywhere; }
+    h2 { margin: 0 0 1rem; font-size: 1.1rem; }
+    .card { margin-top: 1.25rem; padding: 1.25rem; border: 1px solid #344150; border-radius: 14px; background: #18212c; }
+    label { display: block; margin-bottom: .5rem; font-weight: 650; }
+    input, button { min-height: 44px; padding: .7rem .85rem; border: 1px solid #455366; border-radius: 8px; font: inherit; }
+    input { width: 100%; color: inherit; background: #10151c; }
+    .actions { display: flex; flex-wrap: wrap; gap: .75rem; margin-top: 1rem; }
+    button { color: #fff; background: #2563eb; border: 0; font-weight: 700; cursor: pointer; }
+    button.danger, .logout { background: #b42318; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .muted, .session-meta { color: #aab6c5; }
+    .notice { padding: .8rem; border-radius: 8px; background: #202d3a; }
+    .error { color: #fca5a5; }
+    .status { font-weight: 700; }
+    ul { list-style: none; padding: 0; margin: 0; }
+    li { padding: .8rem 0; border-top: 1px solid #344150; overflow-wrap: anywhere; }
+    li:first-child { border-top: 0; }
+    .session-meta { font-size: .9rem; }
+    @media (max-width: 520px) { body { padding-top: .75rem; } header { align-items: flex-start; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Session Monitor</h1>
+    <form method="post" action="{{ url_for('logout') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="logout" type="submit">Sign out</button>
+    </form>
+  </header>
+  <p class="muted">Signed in as {{ email }}</p>
+
+  <section class="card" aria-labelledby="run-title">
+    <h2 id="run-title">Background page checker</h2>
+    <p class="muted">Enter a public website URL. The service visits it 57 times per cycle, with a two-minute delay between visits, then repeats until you stop it. It only loads pages; it does not click controls or submit forms. The job continues on the server after you sign out.</p>
+    <p class="notice">Only check sites you own or are authorized to monitor. Local, private-network, and non-HTTP(S) addresses are blocked.</p>
+    <form id="start-form">
+      <label for="target-url">Website URL</label>
+      <input id="target-url" name="target_url" type="url" maxlength="2048" placeholder="https://example.com" required>
+      <div class="actions">
+        <button id="start-button" type="submit">Start / update my check</button>
+        <button id="stop-button" class="danger" type="button" disabled>Stop my check</button>
+      </div>
+    </form>
+    <p id="message" class="muted" role="status" aria-live="polite"></p>
+  </section>
+
+  <section class="card" aria-labelledby="status-title">
+    <h2 id="status-title">Your run status</h2>
+    <p class="status" id="run-state">Loading status…</p>
+    <p class="muted" id="run-details"></p>
+    <p class="notice">For background jobs to keep running when you are offline, deploy on an always-on paid Render service with its persistent disk. The free tier may sleep and pause checks.</p>
+  </section>
+
+  <section class="card" aria-labelledby="history-title">
+    <h2 id="history-title">Your recent page visits</h2>
+    <ul id="history"><li class="muted">No visits yet.</li></ul>
+  </section>
+
+  <script>
+    const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+    const startButton = document.querySelector("#start-button");
+    const stopButton = document.querySelector("#stop-button");
+    const message = document.querySelector("#message");
+    const runState = document.querySelector("#run-state");
+    const runDetails = document.querySelector("#run-details");
+    const historyList = document.querySelector("#history");
+
+    function formatDate(value) {
+      if (!value) return "—";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+    }
+
+    async function requestApi(path, body) {
+      const response = await fetch(path, {
+        method: body ? "POST" : "GET",
+        headers: body ? {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken
+        } : {},
+        body: body ? JSON.stringify(body) : undefined
+      });
+      if (response.status === 401) {
+        window.location.assign("/login");
+        throw new Error("Your session expired. Sign in again.");
+      }
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status}).`);
+      return data;
+    }
+
+    function renderHistory(visits) {
+      historyList.replaceChildren();
+      if (!visits.length) {
+        const item = document.createElement("li");
+        item.className = "muted";
+        item.textContent = "No visits yet.";
+        historyList.append(item);
+        return;
+      }
+      for (const visit of visits) {
+        const item = document.createElement("li");
+        const title = document.createElement("strong");
+        title.textContent = `Cycle ${visit.cycle_number} · Visit ${visit.visit_number} · HTTP ${visit.http_status ?? "—"}`;
+        const details = document.createElement("div");
+        details.className = "session-meta";
+        details.textContent = `${formatDate(visit.started_at)} · ${visit.page_title || visit.final_url || "Page load attempted"}${visit.error ? ` · ${visit.error}` : ""}`;
+        item.append(title, details);
+        historyList.append(item);
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        const state = await requestApi("/api/status");
+        startButton.disabled = false;
+        stopButton.disabled = !state.active;
+        runState.textContent = state.active
+          ? `Running · cycle ${state.cycle_count + 1} · visit ${state.visit_number} of 57`
+          : "Stopped";
+        runDetails.textContent = [
+          state.target_url ? `Target: ${state.target_url}` : "",
+          state.next_run_at ? `Next visit: ${formatDate(state.next_run_at)}` : "",
+          state.last_error ? `Latest error: ${state.last_error}` : ""
+        ].filter(Boolean).join(" · ");
+        renderHistory(state.visits || []);
+      } catch (error) {
+        runState.textContent = "Could not load status.";
+        message.textContent = error.message;
+        message.className = "error";
+      }
+    }
+
+    document.querySelector("#start-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      message.textContent = "Starting…";
+      message.className = "muted";
+      try {
+        const data = await requestApi("/api/start", {
+          target_url: document.querySelector("#target-url").value
+        });
+        message.textContent = `${data.message} ${data.visits_per_cycle} visits per cycle, ${data.interval_seconds / 60} minutes apart.`;
+        await refreshStatus();
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = "error";
+      }
+    });
+
+    stopButton.addEventListener("click", async () => {
+      message.textContent = "Stopping…";
+      message.className = "muted";
+      try {
+        const data = await requestApi("/api/stop", {});
+        message.textContent = data.message;
+        await refreshStatus();
+      } catch (error) {
+        message.textContent = error.message;
+        message.className = "error";
+      }
+    });
+
+    refreshStatus();
+    window.setInterval(refreshStatus, 15000);
+  </script>
+</body>
+</html>

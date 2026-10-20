@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · Session Monitor</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 system-ui, sans-serif; background: #10151c; color: #edf2f7; }
+    body { min-height: 100vh; margin: 0; display: grid; place-items: center; }
+    main { width: min(90vw, 390px); padding: 2rem; border: 1px solid #344150; border-radius: 16px; background: #18212c; box-sizing: border-box; }
+    h1 { margin-top: 0; font-size: 1.5rem; }
+    label { display: block; margin: 1rem 0 .4rem; }
+    input, button { width: 100%; box-sizing: border-box; padding: .8rem; border: 1px solid #455366; border-radius: 8px; font: inherit; }
+    input { color: inherit; background: #10151c; }
+    button { margin-top: 1rem; color: #fff; background: #2563eb; border: 0; font-weight: 700; cursor: pointer; }
+    .error { color: #fca5a5; }
+    a { color: #93c5fd; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Session Monitor</h1>
+    <p>Sign in to view and manage your background page checks.</p>
+    {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+    <form method="post" action="{{ url_for('login') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label for="email">Email</label>
+      <input id="email" name="email" type="email" autocomplete="username" maxlength="254" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+    </form>
+    <p>Have an invite code? <a href="{{ url_for('signup') }}">Create an account</a></p>
+  </main>
+</body>
+</html>
