@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: phenesty-session-monitor
+    runtime: docker
+    plan: starter
+    healthCheckPath: /health
+    disk:
+      name: session-monitor-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATABASE_PATH
+        value: /var/data/session_monitor.db
+      - key: SIGNUP_INVITE_CODE
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true

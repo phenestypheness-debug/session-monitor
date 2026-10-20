@@ -1,0 +1,9 @@
+.git
+.github
+.pytest_cache
+__pycache__
+*.py[cod]
+session_report.json
+*.db
+*.db-shm
+*.db-wal

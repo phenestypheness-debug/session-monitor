@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.venv/
+session_report.json
+security_test_report.json
+*.db
+*.db-shm
+*.db-wal
