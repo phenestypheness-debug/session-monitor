@@ -1,4 +1,5 @@
 import os
+import re
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -54,12 +55,12 @@ class DashboardAccessTests(unittest.TestCase):
             connection.execute("DELETE FROM jobs")
             connection.execute("DELETE FROM users")
         self.client = app.test_client()
+        self.client.environ_base["HTTP_ORIGIN"] = "https://localhost"
 
     def _signup(self, client, email, password="correct-horse-battery-staple"):
         signup_page = client.get("/signup")
         self.assertEqual(signup_page.status_code, 200)
-        with client.session_transaction() as flask_session:
-            csrf_token = flask_session["csrf_token"]
+        csrf_token = self._csrf_from_response(signup_page)
         return client.post(
             "/signup",
             data={
@@ -70,9 +71,13 @@ class DashboardAccessTests(unittest.TestCase):
             },
         )
 
-    def _csrf(self, client):
-        with client.session_transaction() as flask_session:
-            return flask_session["csrf_token"]
+    def _csrf_from_response(self, response):
+        match = re.search(
+            r'name="csrf_token" value="([^"]+)"',
+            response.get_data(as_text=True),
+        )
+        self.assertIsNotNone(match, "The page should render a CSRF token.")
+        return match.group(1)
 
     def test_health_endpoint_is_public(self):
         response = self.client.get("/health")
@@ -85,8 +90,8 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertIn("/login", response.headers["Location"])
 
     def test_signup_requires_invite_and_valid_password(self):
-        self.client.get("/signup")
-        csrf_token = self._csrf(self.client)
+        signup_page = self.client.get("/signup")
+        csrf_token = self._csrf_from_response(signup_page)
         response = self.client.post(
             "/signup",
             data={
@@ -103,12 +108,12 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
 
     def test_signup_is_disabled_without_a_strong_invite_code(self):
-        self.client.get("/signup")
+        signup_page = self.client.get("/signup")
         with patch.dict(os.environ, {"SIGNUP_INVITE_CODE": "short"}):
             response = self.client.post(
                 "/signup",
                 data={
-                    "csrf_token": self._csrf(self.client),
+                    "csrf_token": self._csrf_from_response(signup_page),
                     "email": "new@example.com",
                     "password": "correct-horse-battery-staple",
                     "invite_code": "short",
@@ -124,12 +129,33 @@ class DashboardAccessTests(unittest.TestCase):
         self.assertIn(b"57 times per cycle", dashboard.data)
         self.assertIn(b"person@example.com", dashboard.data)
 
+    def test_signup_csrf_token_does_not_depend_on_session_cookie(self):
+        signup_page = self.client.get("/signup")
+        csrf_token = self._csrf_from_response(signup_page)
+        fresh_client = app.test_client()
+        fresh_client.environ_base["HTTP_ORIGIN"] = "https://localhost"
+        response = fresh_client.post(
+            "/signup",
+            data={
+                "csrf_token": csrf_token,
+                "email": "fresh@example.com",
+                "password": "correct-horse-battery-staple",
+                "invite_code": os.environ["SIGNUP_INVITE_CODE"],
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(fresh_client.get("/").status_code, 200)
+
     def test_login_and_logout(self):
         self._signup(self.client, "person@example.com")
-        self.client.post("/logout", data={"csrf_token": self._csrf(self.client)})
+        dashboard = self.client.get("/")
+        self.client.post(
+            "/logout",
+            data={"csrf_token": self._csrf_from_response(dashboard)},
+        )
         login_page = self.client.get("/login")
         self.assertEqual(login_page.status_code, 200)
-        csrf_token = self._csrf(self.client)
+        csrf_token = self._csrf_from_response(login_page)
         response = self.client.post(
             "/login",
             data={
@@ -144,25 +170,27 @@ class DashboardAccessTests(unittest.TestCase):
     @patch("app.validate_public_url", return_value="https://example.com/")
     def test_job_keeps_running_after_logout_and_is_private_to_account(self, _validate):
         self._signup(self.client, "first@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         response = self.client.post(
             "/api/start",
             json={"target_url": "https://example.com/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         self.assertEqual(response.status_code, 202)
-        self.client.post("/logout", data={"csrf_token": self._csrf(self.client)})
+        self.client.post("/logout", data={"csrf_token": csrf_token})
 
         other = app.test_client()
+        other.environ_base["HTTP_ORIGIN"] = "https://localhost"
         self._signup(other, "second@example.com")
         other_status = other.get("/api/status").get_json()
         self.assertFalse(other_status["active"])
         self.assertIsNone(other_status["target_url"])
 
-        self.client.get("/login")
+        login_page = self.client.get("/login")
         self.client.post(
             "/login",
             data={
-                "csrf_token": self._csrf(self.client),
+                "csrf_token": self._csrf_from_response(login_page),
                 "email": "first@example.com",
                 "password": "correct-horse-battery-staple",
             },
@@ -173,25 +201,27 @@ class DashboardAccessTests(unittest.TestCase):
 
     def test_start_rejects_private_target(self):
         self._signup(self.client, "person@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         response = self.client.post(
             "/api/start",
             json={"target_url": "http://127.0.0.1/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         self.assertEqual(response.status_code, 400)
 
     @patch("app.validate_public_url", return_value="https://example.com/")
     def test_stop_only_stops_the_signed_in_users_job(self, _validate):
         self._signup(self.client, "first@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         self.client.post(
             "/api/start",
             json={"target_url": "https://example.com/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         response = self.client.post(
             "/api/stop",
             json={},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         self.assertEqual(response.status_code, 200)
         self.assertFalse(self.client.get("/api/status").get_json()["active"])
@@ -199,17 +229,18 @@ class DashboardAccessTests(unittest.TestCase):
     @patch("app.validate_public_url", return_value="https://example.com/")
     def test_stopped_job_is_skipped_when_already_queued(self, _validate):
         self._signup(self.client, "person@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         self.client.post(
             "/api/start",
             json={"target_url": "https://example.com/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         with session_monitor._connect_db() as connection:
             job = connection.execute("SELECT * FROM jobs").fetchone()
         self.client.post(
             "/api/stop",
             json={},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         with patch("app._visit_target") as visit:
             session_monitor.process_due_job(job)
@@ -228,10 +259,11 @@ class DashboardAccessTests(unittest.TestCase):
     )
     def test_each_visit_is_scheduled_two_minutes_later(self, _visit):
         self._signup(self.client, "person@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         self.client.post(
             "/api/start",
             json={"target_url": "https://example.com/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         with session_monitor._connect_db() as connection:
             job = connection.execute("SELECT * FROM jobs").fetchone()
@@ -255,10 +287,11 @@ class DashboardAccessTests(unittest.TestCase):
 
     def test_completing_visit_57_advances_to_next_cycle(self):
         self._signup(self.client, "person@example.com")
+        csrf_token = self._csrf_from_response(self.client.get("/"))
         self.client.post(
             "/api/start",
             json={"target_url": "https://example.com/"},
-            headers={"X-CSRF-Token": self._csrf(self.client)},
+            headers={"X-CSRF-Token": csrf_token},
         )
         with session_monitor._connect_db() as connection:
             connection.execute(
