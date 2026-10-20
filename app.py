@@ -25,6 +25,7 @@ from flask import (
     session,
     url_for,
 )
+from itsdangerous import BadSignature, URLSafeTimedSerializer
 from playwright.sync_api import Browser, BrowserContext, Route, sync_playwright
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -171,14 +172,48 @@ def validate_public_url(value: object) -> str:
 
 
 def _require_csrf() -> None:
-    expected = session.get("csrf_token")
     supplied = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
-    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+    if not supplied:
         abort(400, description="Invalid or missing CSRF token.")
+    origin = request.headers.get("Origin")
+    if not origin:
+        origin = request.headers.get("Referer")
+    if not origin:
+        abort(400, description="Missing request origin.")
+    try:
+        origin_url = urlsplit(origin)
+    except ValueError:
+        abort(400, description="Invalid request origin.")
+    if (
+        origin_url.scheme not in ("http", "https")
+        or not origin_url.netloc
+        or origin_url.netloc.casefold() != request.host.casefold()
+    ):
+        abort(400, description="Cross-origin requests are not allowed.")
+    try:
+        value = URLSafeTimedSerializer(
+            app.config["SECRET_KEY"],
+            salt="session-monitor-csrf",
+        ).loads(supplied, max_age=3600)
+    except BadSignature:
+        abort(400, description="Invalid or expired CSRF token.")
+    if (
+        not isinstance(value, dict)
+        or value.get("user_id") != session.get("user_id")
+    ):
+        abort(400, description="Invalid CSRF token.")
 
 
 def _csrf_token() -> str:
-    return session.setdefault("csrf_token", secrets.token_urlsafe(32))
+    return URLSafeTimedSerializer(
+        app.config["SECRET_KEY"],
+        salt="session-monitor-csrf",
+    ).dumps(
+        {
+            "nonce": secrets.token_urlsafe(32),
+            "user_id": session.get("user_id"),
+        }
+    )
 
 
 def _current_user() -> sqlite3.Row | None:
